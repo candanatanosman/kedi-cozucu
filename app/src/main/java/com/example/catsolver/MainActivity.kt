@@ -92,7 +92,7 @@ class MainActivity : ComponentActivity() {
                     Text("Kedi Çözücü", style = MaterialTheme.typography.headlineMedium)
                     Text(
                         "Başlat'a basın, oyuna geçin, 🐱 düğmesine dokunun. " +
-                            "Çözüm oyunun üstünde görünür. Düğmeye tekrar dokununca kaybolur."
+                            "Her dokunuş yeniden çözer. Kedileri kaldırmak için düğmeye uzun basın."
                     )
                     Button(onClick = { start() }, modifier = Modifier.fillMaxWidth()) {
                         Text("Başlat")
@@ -120,6 +120,7 @@ class OverlayService : Service() {
     private lateinit var bg: Handler
     private var button: TextView? = null
     private var catView: CatView? = null
+    private var banner: TextView? = null
     private var busy = false
     private var screenW = 0
     private var screenH = 0
@@ -218,10 +219,12 @@ class OverlayService : Service() {
         ).apply { gravity = Gravity.TOP or Gravity.START; x = 16; y = 400 }
 
         var sx = 0f; var sy = 0f; var ox = 0; var oy = 0; var moved = false
+        var downT = 0L
         tv.setOnTouchListener { _, e ->
             when (e.action) {
                 MotionEvent.ACTION_DOWN -> {
                     sx = e.rawX; sy = e.rawY; ox = lp.x; oy = lp.y; moved = false
+                    downT = System.currentTimeMillis()
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (e.rawX - sx).toInt()
@@ -229,7 +232,13 @@ class OverlayService : Service() {
                     if (Math.abs(dx) > 10 || Math.abs(dy) > 10) moved = true
                     if (moved) { lp.x = ox + dx; lp.y = oy + dy; wm.updateViewLayout(tv, lp) }
                 }
-                MotionEvent.ACTION_UP -> if (!moved) toggle()
+                MotionEvent.ACTION_UP -> if (!moved) {
+                    if (System.currentTimeMillis() - downT > 600) {
+                        removeCats()
+                    } else {
+                        toggle()
+                    }
+                }
             }
             true
         }
@@ -237,31 +246,67 @@ class OverlayService : Service() {
         button = tv
     }
 
+    // Ekranın üstünde kısa mesaj kutusu (toast bazı telefonlarda arka planda görünmüyor)
+    private fun say(msg: String) {
+        removeBanner()
+        val tv = TextView(this).apply {
+            text = msg
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            setPadding(32, 20, 32, 20)
+            background = GradientDrawable().apply {
+                setColor(0xE6000000.toInt())
+                cornerRadius = 24f
+            }
+        }
+        val lp = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; y = 150 }
+        wm.addView(tv, lp)
+        banner = tv
+        ui.postDelayed({
+            if (banner === tv) removeBanner()
+        }, 3000)
+    }
+
+    private fun removeBanner() {
+        val b = banner ?: return
+        try { wm.removeView(b) } catch (e: Exception) { }
+        banner = null
+    }
+
     private fun toggle() {
-        if (catView != null) { removeCats(); return }
         if (busy) return
         busy = true
+        removeBanner()
+        removeCats()
         button?.visibility = View.INVISIBLE
+        // Kedilerin kalkması, düğmenin gizlenmesi ve yeni karenin gelmesi için bekleme
         ui.postDelayed({
-            val bmp = grab()
+            val bmp = try { grab() } catch (e: Throwable) { null }
             button?.visibility = View.VISIBLE
             if (bmp == null) {
-                Toast.makeText(applicationContext, "Ekran karesi alınamadı", Toast.LENGTH_SHORT).show()
+                say("Ekran karesi alınamadı")
                 busy = false
             } else {
                 bg.post {
-                    val (found, msg) = analyze(bmp)
+                    val res: Pair<Found?, String> = try {
+                        analyze(bmp)
+                    } catch (e: Throwable) {
+                        Pair(null, "Hata: " + e.javaClass.simpleName)
+                    }
                     ui.post {
-                        if (found == null) {
-                            Toast.makeText(applicationContext, msg, Toast.LENGTH_LONG).show()
-                        } else {
-                            showCats(found)
-                        }
+                        val f = res.first
+                        if (f == null) say(res.second) else showCats(f)
                         busy = false
                     }
                 }
             }
-        }, 250)
+        }, 300)
     }
 
     private fun showCats(f: Found) {
@@ -288,11 +333,13 @@ class OverlayService : Service() {
     }
 
     private fun removeCats() {
-        catView?.let { wm.removeView(it) }
+        val v = catView ?: return
+        try { wm.removeView(v) } catch (e: Exception) { }
         catView = null
     }
 
     override fun onDestroy() {
+        removeBanner()
         removeCats()
         button?.let { wm.removeView(it) }
         vd?.release()
